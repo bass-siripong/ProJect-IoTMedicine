@@ -3,36 +3,51 @@
 #include <Servo.h>
 #include <String.h>
 #include <TridentTD_LineNotify.h>
-#include <WiFiManager.h> // เพิ่ม WiFiManager Library
+#include <WiFiManager.h>
+#include <WiFiClientSecure.h>
+#include <SoftwareSerial.h>
+#include <DFRobotDFPlayerMini.h>
 
-// กำหนดค่าอื่น ๆ เช่น Servo, Sensor, Buzzer และอื่น ๆ
+SoftwareSerial mySoftwareSerial(13, 12); // TX (D7), RX (D6)
+DFRobotDFPlayerMini myDFPlayer;
+
 Servo myservo;
 #define sensor D5
 #define buzzer D2
 #define Relay  D1
 int x, i, k, val;
 
-// กำหนดค่า LINE Token และ URLs ต่าง ๆ
-const char* LINE_TOKEN = "LINE_TOKEN";
 String POSTURL = "POSTURL";
 String GETURL  = "GETURL";
+String POSTSTT = "POSTSTT";
 
 // ประกาศตัวแปรและ Object HTTP
 WiFiClient client;
 HTTPClient http;
 int httpCode;
-
-// ประกาศตัวแปรอื่น ๆ ที่ใช้งาน
+int modesend; // 1 = Telegram | 0 = LINE
+int Mode_Sound; // 1 = เช้า, กลางวัน, เย็น, ก่อนนอน | 0 = ก่อนอาหาร, หลังอาหาร // ไม่ใช้
+int mode_setting; // 1 = ดังเป็นเสียงลำโพง | 2 = ดังเป็นเสียงพูดอย่างเดียว | 3 = ดังเป็นเสียงลำโพง&เสียงพูด
 int UserID;
-String time_get, Fullname, bf_time, lun_time, dn_time, bb_time;
+String time_get, Fullname, LINE_TOKEN, bf_time, lun_time, dn_time, bb_time;
 String bf_stt, lun_stt, dn_stt, bb_stt;
 int bf_medic[4], lun_medic[4], dn_medic[4], bb_medic[4], medic_send[4];
 int meal;
+int Delay;
 int Count_medicine;
 String status;
+// #define LINE_TOKEN "xxxxx" // ใส่ LINE token ที่ได้จาก LINE Notify
+//Telegram
+#define BOT_TOKEN "7509420222:AAH9hUDidj4h3Z1W6RULIX5dX0vtENjIMas"
+#define CHAT_ID "-1002266490516"
+const char* host = "api.telegram.org";
+WiFiClientSecure client_teltegram;
+
+String lastStatus = "offline";
 
 void setup() {
   Serial.begin(115200);
+  mySoftwareSerial.begin(9600);
   pinMode(sensor, INPUT);
   pinMode(buzzer, OUTPUT);
   pinMode(Relay, OUTPUT);
@@ -40,10 +55,16 @@ void setup() {
   digitalWrite(Relay, HIGH);
   myservo.attach(D4);
 
-  // เรียกฟังก์ชัน connectWiFi เพื่อเปิดใช้งาน Wi-Fi Manager
+  Serial.println("Initializing DFPlayer Mini...");
+  if (!myDFPlayer.begin(mySoftwareSerial)) {
+    Serial.println("DFPlayer Mini initialization failed!");
+    Serial.println("Check connections and SD card.");
+    while (true);
+  }
+  Serial.println("DFPlayer Mini initialized successfully!");
+  myDFPlayer.volume(20);
   connectWiFi();
 
-  // ส่วนของการเชื่อมต่อ HTTP GET
   http.begin(client, GETURL);
   httpCode = http.GET();
   String payload = http.getString();
@@ -55,10 +76,8 @@ void setup() {
     delay(500);
   }
   Serial.print("Connect Code: "); Serial.println(httpCode);
-  Serial.println(LINE.getVersion());
-  LINE.setToken(LINE_TOKEN);
-  LINE.notify("SETUP COMPLETE");
-  Serial.print("payload: "); Serial.println(payload);
+  sendTelegramMessage("เครื่องจ่ายยาอัตโนมัติ พร้อมใช้งาน");
+  //Serial.print("payload: "); Serial.println(payload);
   Serial.println("----------SETUP CONTROL.INO READY--------------");
   delay(250);
 }
@@ -66,6 +85,7 @@ void setup() {
 void loop() {
   digitalWrite(buzzer, HIGH);
   digitalWrite(Relay, HIGH);
+
   while (WiFi.status() != WL_CONNECTED) {
     Serial.println("!WiFi");
     connectWiFi();
@@ -77,20 +97,35 @@ void loop() {
     delay(250);
   }
 
-  //Serial.print("Time get = "); Serial.print(time_get);
-  //Serial.print("Full name = "); Serial.print(Fullname);
-  //Serial.print("Count medicine = "); Serial.println(Count_medicine);
+  //Serial.println(UserID);
+  String currentStatus = (WiFi.status() == WL_CONNECTED) ? "online" : "offline";
+  sendStatus(currentStatus);
+  lastStatus = currentStatus;
 
+  // Test Serial.println(value) Here for sure
   condition_GET();
   condition_CHECK();
   delay(1000 * 5);
 }
 
-// ฟังก์ชันการเชื่อมต่อ WiFi ด้วย WiFiManager
+void sendStatus(String status_post) {
+  if (WiFi.status() == WL_CONNECTED) {
+    http.begin(client, POSTSTT);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    String postData = "status=" + status_post + "&UserID=" + String(UserID);
+    int httpResponseCode = http.POST(postData);
+    // ดีบักข้อมูล
+    //Serial.println("POST Data: " + postData);
+    //Serial.println("HTTP Response code: " + String(httpResponseCode));
+    http.end();
+  } else {
+    Serial.println("WiFi Disconnected");
+  }
+}
+
 void connectWiFi() {
   WiFiManager wifiManager;
   
-  // หากต้องการรีเซ็ต Wi-Fi ที่บันทึกไว้ ใช้ wifiManager.resetSettings();
   if (!wifiManager.autoConnect("ESP8266_AP_Controller")) {  // ชื่อ AP "ESP8266_AP"
     Serial.println("Failed to connect and hit timeout");
     ESP.restart();  // รีบูตใหม่ถ้าเชื่อมต่อไม่สำเร็จ
@@ -103,7 +138,7 @@ void connectWiFi() {
 
 // Servo rotate counter-clockwise full-speed
 void rotateservo() {
-  myservo.writeMicroseconds(1400); // lol
+  myservo.writeMicroseconds(1400);
 }
 
 // Servo rotation stopped
@@ -136,9 +171,25 @@ void condition_GET() {
   // GET Fullname = firstname + lastname
   int n = payload.indexOf("Fullname=");
     String nn = payload.substring(n + 9);
-    int substr_nn = nn.indexOf("ENDNAME");
+    int substr_nn = nn.indexOf("|");
     nn = nn.substring(0, substr_nn);
   Fullname = nn;
+
+  int index1 = payload.indexOf("Delay=");
+    String userIDString1 = payload.substring(index1 + 6);
+    Delay = userIDString1.toInt();
+
+  // GET TokenLine
+  if (LINE_TOKEN == NULL || LINE_TOKEN.length() == 0) { // ตรวจสอบว่าค่าว่างหรือ NULL
+    int m = payload.indexOf("Token=");
+    String mm = payload.substring(m + 6);
+    int substr_mm = mm.indexOf("|");
+    mm = mm.substring(0, substr_mm);
+    LINE_TOKEN = mm; // ตั้งค่าใหม่ให้กับ LINE_TOKEN
+    //Serial.println(LINE.getVersion());
+    LINE.setToken(LINE_TOKEN);
+    LINE.notify("เครื่องจ่ายยาอัตโนมัติ พร้อมใช้งาน");
+  }
 
   // GET bf_time
   int bf = payload.indexOf("bf_time=");
@@ -236,9 +287,27 @@ void condition_GET() {
 
   int cots = payload.indexOf("Count_medicine=");
   String stcots = payload.substring(cots + 15);
-    int cotsIndex = stcots.indexOf("END");
+    int cotsIndex = stcots.indexOf("|");
     stcots = stcots.substring(0, cotsIndex);
   Count_medicine = stcots.toInt();
+
+  int cots1 = payload.indexOf("Mode_Sound=");
+  String stcots1 = payload.substring(cots1 + 11);
+    int cotsIndex1 = stcots1.indexOf("|");
+    stcots1 = stcots1.substring(0, cotsIndex1);
+  Mode_Sound = stcots1.toInt();
+
+  int cots2 = payload.indexOf("modesend=");
+  String stcots2 = payload.substring(cots2 + 9);
+    int cotsIndex2 = stcots2.indexOf("|");
+    stcots2 = stcots2.substring(0, cotsIndex2);
+  modesend = stcots2.toInt();
+
+  int cots3 = payload.indexOf("mode_setting=");
+  String stcots3 = payload.substring(cots3 + 13);
+    int cotsIndex3 = stcots3.indexOf("|");
+    stcots3 = stcots3.substring(0, cotsIndex3);
+  mode_setting = stcots3.toInt();
 }
 
 // Condition_CHECK data before POST *
@@ -251,6 +320,11 @@ void condition_CHECK() {
       medic_send[1] = bf_medic[1];
       medic_send[2] = bf_medic[2];
       medic_send[3] = bf_medic[3];
+      if (mode_setting == 2 || mode_setting == 3) {
+        myDFPlayer.play(5); //ถึงเวลากำหนดจ่ายยา
+        Serial.println("ถึงเวลากำหนดจ่ายยา");
+        delay(1000 * 5);
+      }
       condition_CHECK_send();
   } else if (time_get == lun_time && x == 0 && httpCode == 200) {
       meal = 2;
@@ -260,6 +334,11 @@ void condition_CHECK() {
       medic_send[1] = lun_medic[1];
       medic_send[2] = lun_medic[2];
       medic_send[3] = lun_medic[3];
+      if (mode_setting == 2 || mode_setting == 3) {
+        myDFPlayer.play(5); //ถึงเวลากำหนดจ่ายยา
+        Serial.println("ถึงเวลากำหนดจ่ายยา");
+        delay(1000 * 5);
+      }
       condition_CHECK_send();
   } else if (time_get == dn_time && x == 0 && httpCode == 200) {
       meal = 3;
@@ -269,6 +348,11 @@ void condition_CHECK() {
       medic_send[1] = dn_medic[1];
       medic_send[2] = dn_medic[2];
       medic_send[3] = dn_medic[3];
+      if (mode_setting == 2 || mode_setting == 3) {
+        myDFPlayer.play(5); //ถึงเวลากำหนดจ่ายยา
+        Serial.println("ถึงเวลากำหนดจ่ายยา");
+        delay(1000 * 5);
+      }
       condition_CHECK_send();
   } else if (time_get == bb_time && x == 0 && httpCode == 200) {
       meal = 4;
@@ -278,18 +362,40 @@ void condition_CHECK() {
       medic_send[1] = bb_medic[1];
       medic_send[2] = bb_medic[2];
       medic_send[3] = bb_medic[3];
+      if (mode_setting == 2 || mode_setting == 3) {
+        myDFPlayer.play(5); //ถึงเวลากำหนดจ่ายยา
+        Serial.println("ถึงเวลากำหนดจ่ายยา");
+        delay(1000 * 5);
+      }
       condition_CHECK_send();
   }
 }
 
 // Condition in condition_CHECK
 void condition_CHECK_send() {
-  Serial.println("Time to medicine!");
-  LINE.notify("ถึงเวลาที่กำหนดจ่ายยาแล้ว!");
+  Serial.println("ถึงเวลาที่กำหนดจ่ายยาแล้ว!");
+  if(modesend == 0){
+    LINE.notify("ถึงเวลาที่กำหนดจ่ายยาแล้ว!");
+  }else if(modesend == 1){
+    sendTelegramMessage("ถึงเวลาที่กำหนดจ่ายยาแล้ว!");
+  }
   rotateservo();
-  delay(265); //lol
+  delay(275); //lol
   stopservo();
-  delay(1000);
+  delay(500);
+  if (mode_setting == 1 || mode_setting == 3) {
+    digitalWrite(buzzer, LOW);
+    digitalWrite(Relay, LOW);
+    delay(750);
+    digitalWrite(buzzer, HIGH);
+    digitalWrite(Relay, HIGH);
+    delay(750);
+  } else if (mode_setting == 2){
+    digitalWrite(Relay, LOW);
+    delay(750);
+    digitalWrite(Relay, HIGH);
+    delay(750);
+  }
   x = 1;
   Count_medicine = Count_medicine-1;
   condition_grap();
@@ -300,44 +406,141 @@ void condition_grap() {
   while (x == 1) {
     k++;
     val = digitalRead(sensor);
-    digitalWrite(buzzer, LOW);
-    digitalWrite(Relay, LOW);
-    delay(750);
-    digitalWrite(buzzer, HIGH);
-    digitalWrite(Relay, HIGH);
-    delay(750);
+    delay(1000); // 1-second delay for timing
+    
     if (x == 1 && val == 1) {
-      digitalWrite(buzzer, LOW);
+      // Medicine successfully taken
       digitalWrite(Relay, LOW);
       delay(150);
-      digitalWrite(buzzer, HIGH);
       digitalWrite(Relay, HIGH);
       delay(150);
-      digitalWrite(buzzer, LOW);
       digitalWrite(Relay, LOW);
       delay(150);
-      digitalWrite(buzzer, HIGH);
       digitalWrite(Relay, HIGH);
+      if (mode_setting == 2 || mode_setting == 3) {
+        myDFPlayer.play(2); // ขอบคุณค่ะ
+        Serial.println("ขอบคุณค่ะ");
+        delay(1000 * 5);
+        myDFPlayer.play(3); // การรับประทานยาให้ตรง...
+        Serial.println("การรับประทานยาให้ตรง...");
+        delay(1000 * 10);
+      } 
       Serial.println("Take medicine success!");
       status = "success";
-      LINE.notify("\nคุณ \n" + Fullname + "ได้รับยาในเวลาที่กำหนด!");
-      LINE.notifyPicture("สำเร็จ!", "https://cdn-icons-png.flaticon.com/512/4436/4436481.png");
-      LINE.notify("\nขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+      if(modesend == 0){
+        LINE.notify("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยทันเวลาที่กำหนด!");
+        LINE.notifyPicture("https://cdn-icons-png.flaticon.com/512/4436/4436481.png");
+        LINE.notify("\nขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+      }else if(modesend == 1){
+        sendTelegramMessage("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยทันเวลาที่กำหนด!");
+        sendTelegramPhoto("https://cdn-icons-png.flaticon.com/512/4436/4436481.png");
+        sendTelegramMessage("ขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+      }
+
       delay(1000);
       condition_POST();
-      k = 0;
-    } else if (k >= 600) {
+      k = 0; // Reset timer
+    } 
+    else if (k == 60) { // 1 minute passed with no action
+      Serial.println("Reminder: Take your medicine!");
+      if(modesend == 0){
+        LINE.notify("กรุณารับประทานยาตามเวลาที่กำหนด!");
+      }else if(modesend == 1){
+        sendTelegramMessage("กรุณารับประทานยาตามเวลาที่กำหนด!");
+      }
+      // Repeated buzzer and relay activation every second until medicine is taken or 2 minutes pass
+      while (k <= 70 && digitalRead(sensor) == 0) { // Keep notifying until 2 minutes or medicine is taken
+        if (mode_setting == 1) {
+          digitalWrite(buzzer, LOW);
+          digitalWrite(Relay, LOW);
+          delay(500);
+          digitalWrite(buzzer, HIGH);
+          digitalWrite(Relay, HIGH);
+          delay(500);
+          digitalWrite(buzzer, LOW);
+          digitalWrite(Relay, LOW);
+          delay(500);
+          digitalWrite(buzzer, HIGH);
+          digitalWrite(Relay, HIGH);
+          delay(500);
+        } else if (mode_setting == 2) {
+          myDFPlayer.play(6); // ยังไม่ได้รับยาค่ะ กรุณารับยา
+          delay(1000 * 5);
+          digitalWrite(Relay, LOW);
+          delay(500);
+          digitalWrite(Relay, HIGH);
+          delay(500);
+        } else if (mode_setting == 3) {
+          myDFPlayer.play(6); // ยังไม่ได้รับยาค่ะ กรุณารับยา
+          delay(1000 * 5);
+          digitalWrite(buzzer, LOW);
+          digitalWrite(Relay, LOW);
+          delay(250);
+          digitalWrite(buzzer, HIGH);
+          digitalWrite(Relay, HIGH);
+          delay(250);
+          digitalWrite(buzzer, LOW);
+          digitalWrite(Relay, LOW);
+          delay(250);
+          digitalWrite(buzzer, HIGH);
+          digitalWrite(Relay, HIGH);
+          delay(250);
+        }
+        k++; // Increment time counter
+      }
+      // Check if medicine is taken after reminders
+      if (x == 1 && val == 1) {
+        digitalWrite(Relay, LOW);
+        delay(150);
+        digitalWrite(Relay, HIGH);
+        delay(150);
+        digitalWrite(Relay, LOW);
+        delay(150);
+        digitalWrite(Relay, HIGH);
+        if (mode_setting == 2 || mode_setting == 3) {
+          myDFPlayer.play(2); // ขอบคุณค่ะ
+          Serial.println("ขอบคุณค่ะ");
+          delay(1000 * 5);
+          myDFPlayer.play(3); // การรับประทานยาให้ตรง...
+          Serial.println("การรับประทานยาให้ตรง...");
+          delay(1000 * 10);
+        } 
+        Serial.println("Take medicine success after reminder!");
+        status = "success";
+        if(modesend == 0){
+          LINE.notify("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยทันเวลาที่กำหนดหลังการแจ้งเตือน!");
+          LINE.notifyPicture("https://cdn-icons-png.flaticon.com/512/4436/4436481.png");
+          LINE.notify("\nขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+        } else if(modesend == 1){
+          sendTelegramMessage("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยทันเวลาที่กำหนดหลังการแจ้งเตือน!");
+          sendTelegramPhoto("https://cdn-icons-png.flaticon.com/512/4436/4436481.png");
+          sendTelegramMessage("ขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+        }
+        delay(1000);
+        condition_POST();
+        k = 0; // Reset timer
+      }
+    } else if (k >= 70) { // 2 minutes passed (failed)
       digitalWrite(buzzer, HIGH);
       digitalWrite(Relay, HIGH);
       Serial.println("Take medicine failed!");
       status = "failed";
-      LINE.notify("\nผู้ป่วย คุณ \n" + Fullname + "ไม่ได้รับยาในเวลาที่กำหนด!");
-      LINE.notifyPicture("ไม่สำเร็จ!", "https://www.shareicon.net/data/256x256/2015/09/15/101562_incorrect_512x512.png");
+      if(modesend == 0){
+        LINE.notify("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยไม่สำเร็จ!");
+        LINE.notifyPicture("https://www.shareicon.net/data/256x256/2015/09/15/101562_incorrect_512x512.png");
+        LINE.notify("\nขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+      }else if(modesend == 1){
+        sendTelegramMessage("เครื่องที่ " + Fullname + " " + UserID + " จ่ายยาให้ผู้ป่วยไม่สำเร็จ!");
+        sendTelegramPhoto("https://www.shareicon.net/data/256x256/2015/09/15/101562_incorrect_512x512.png");
+        sendTelegramMessage("ขณะนี้จำนวนหลอดยาภายในเครื่องจ่ายยาอยู่ที่ " + String(Count_medicine) + " หลอด กรุณาตรวจสอบความถูกต้อง และดำเนินการเติมหลอดยาตามความเหมาะสมการใช้งานของท่าน");
+      }
       delay(1000);
       condition_POST();
-      k = 0;
+      k = 0; // Reset timer
     }
   }
+
+  // Ensure buzzer and relay return to default states after loop
   digitalWrite(buzzer, HIGH);
   digitalWrite(Relay, HIGH);
 }
@@ -357,10 +560,40 @@ void condition_POST() {
   Serial.print("HTTP_POST Response Code: "); Serial.println(httpCode);
   Serial.print("POSTURL : "); Serial.println(POSTURL); 
   Serial.print("Data: ");     Serial.println(postData);
-  Serial.print("payload : "); Serial.println(payload);
-  delay(1000 * 60 * 2);
+  //Serial.print("payload : "); Serial.println(payload);
+  delay(1000 * 55);
   condition_GET();
   x = 0;
   delay(150);
   loop();
+}
+
+void sendTelegramMessage(String message) {
+  client_teltegram.setInsecure(); 
+  if (client_teltegram.connect(host, 443)) {  // เชื่อมต่อกับ Telegram API ผ่าน HTTPS
+    String url = "/bot" + String(BOT_TOKEN) + "/sendMessage?chat_id=" + CHAT_ID + "&text=" + message;
+    client_teltegram.print(String("GET ") + url + " HTTP/1.1\r\n" +
+    "Host: " + host + "\r\n" + 
+    "Connection: close\r\n\r\n");
+    delay(500);  // ให้เวลาสำหรับการส่งคำขอ
+    //Serial.println("Telegram");
+  } else {
+    Serial.println("Telegram Connection failed!");
+  }
+  client_teltegram.stop();  // ปิดการเชื่อมต่อ
+}
+
+void sendTelegramPhoto(String photoUrl) {
+  client_teltegram.setInsecure(); 
+  if (client_teltegram.connect(host, 443)) {  // เชื่อมต่อกับ Telegram API ผ่าน HTTPS
+    String url = "/bot" + String(BOT_TOKEN) + "/sendPhoto?chat_id=" + CHAT_ID + "&photo=" + photoUrl;
+    client_teltegram.print(String("GET ") + url + " HTTP/1.1\r\n" +
+    "Host: " + host + "\r\n" + 
+    "Connection: close\r\n\r\n");
+    delay(500);  // ให้เวลาสำหรับการส่งคำขอ
+    //Serial.println("Telegram Photo Sent!");
+  } else {
+    Serial.println("Telegram Connection failed!");
+  }
+  client_teltegram.stop();  // ปิดการเชื่อมต่อ
 }
